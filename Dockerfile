@@ -10,7 +10,7 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # Create non-root user for security
-RUN groupadd -r kiro && useradd -r -g kiro kiro
+RUN groupadd -r -g 1000 kiro && useradd -r -u 1000 -g kiro -m kiro
 
 # Set working directory and give ownership to kiro user
 WORKDIR /app
@@ -34,12 +34,12 @@ RUN mkdir -p debug_logs && chown -R kiro:kiro debug_logs
 USER kiro
 
 # Expose port
-EXPOSE 8000
+EXPOSE 8787
 
 # Health check
 # Using httpx (our main HTTP library) instead of requests
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import httpx; httpx.get('http://localhost:8000/health', timeout=5)"
+    CMD python -c "import httpx; httpx.get('http://localhost:${SERVER_PORT:-8787}/health', timeout=5)"
 
 # Run the application
-CMD ["python", "main.py"]
+CMD ["python", "main.py", "--port", "8787"]

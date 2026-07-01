@@ -247,6 +247,7 @@ HIDDEN_MODELS: Dict[str, str] = {
 #
 # Default: {"auto-kiro": "auto"} to avoid Cursor IDE conflict
 MODEL_ALIASES: Dict[str, str] = {
+    "claude-opus-4-8": "claude-opus-4.7",  # Alias: 4.8 not yet in Kiro API
     "auto-kiro": "auto",  # Default alias to avoid Cursor's "auto" model conflict
 }
 
