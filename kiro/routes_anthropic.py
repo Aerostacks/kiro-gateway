@@ -252,16 +252,24 @@ async def messages(
     # WebSearch Support - Path B: Auto-Injection (MCP Tool Emulation)
     # ==============================================================================
     
+    # Determine whether the CLIENT declared its own web_search tool BEFORE we
+    # auto-inject. If it did, the client owns web_search execution and the
+    # gateway must NOT intercept the resulting tool_use in the stream --
+    # otherwise Path B emulation synthesizes a terminal end_turn turn and the
+    # client's agent loop stalls (the tool_use never reaches the client). See
+    # the intercept_web_search gate threaded into streaming below.
+    client_has_own_web_search = any(
+        getattr(tool, "name", "") == "web_search"
+        for tool in (request_data.tools or [])
+    )
+
     # Auto-inject web_search tool if enabled (Path B - MCP emulation)
     if WEB_SEARCH_ENABLED:
         if request_data.tools is None:
             request_data.tools = []
         
         # Check if web_search already exists (by name)
-        has_ws = any(
-            getattr(tool, "name", "") == "web_search"
-            for tool in request_data.tools
-        )
+        has_ws = client_has_own_web_search
         
         if not has_ws:
             from kiro.models_anthropic import AnthropicTool
@@ -278,6 +286,16 @@ async def messages(
             )
             request_data.tools.append(web_search_tool)
             logger.debug("Auto-injected web_search tool for MCP emulation (Path B)")
+
+    # Only emulate web_search (Path B streaming interception) when the gateway
+    # itself owns the tool. When the client brought its own web_search, let the
+    # tool_use pass through untouched so the client executes it.
+    intercept_web_search = WEB_SEARCH_ENABLED and not client_has_own_web_search
+    if client_has_own_web_search:
+        logger.debug(
+            "Client declared its own web_search tool; Path B interception disabled "
+            "(tool_use will pass through to client)"
+        )
     
     # ==============================================================================
     # WebSearch Support - Path A: Native Anthropic (Early Return)
@@ -457,6 +475,7 @@ async def messages(
                                     request_messages=messages_for_tokenizer,
                                     request_tools=tools_for_tokenizer,
                                     request_system=system_for_tokenizer,
+                                    intercept_web_search=intercept_web_search,
                                 ):
                                     yield chunk
                             except GeneratorExit:
@@ -815,6 +834,7 @@ async def messages(
                         request_messages=messages_for_tokenizer,
                         request_tools=tools_for_tokenizer,
                         request_system=system_for_tokenizer,
+                        intercept_web_search=intercept_web_search,
                     ):
                         yield chunk
                 except GeneratorExit:
