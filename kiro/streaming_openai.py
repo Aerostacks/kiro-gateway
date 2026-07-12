@@ -303,6 +303,12 @@ async def stream_kiro_to_openai_internal(
         
         # Count completion_tokens (output) using tiktoken
         completion_tokens = count_tokens(full_content + full_thinking_content)
+
+        # Count reasoning (fake-thinking) tokens separately. They remain part of
+        # completion_tokens per the OpenAI spec, and are also surfaced under
+        # completion_tokens_details.reasoning_tokens so downstream trackers can
+        # attribute them.
+        reasoning_tokens = count_tokens(full_thinking_content) if full_thinking_content else 0
         
         # Calculate total_tokens based on context_usage_percentage from Kiro API
         # context_usage shows TOTAL percentage of context usage (input + output)
@@ -402,6 +408,12 @@ async def stream_kiro_to_openai_internal(
             }
         }
         
+        # Break out reasoning tokens (OpenAI-compatible usage detail).
+        if reasoning_tokens:
+            final_chunk["usage"]["completion_tokens_details"] = {
+                "reasoning_tokens": reasoning_tokens,
+            }
+
         if metering_data:
             final_chunk["usage"]["credits_used"] = metering_data
         
@@ -410,6 +422,7 @@ async def stream_kiro_to_openai_internal(
             f"[Usage] {model}: "
             f"prompt_tokens={prompt_tokens} ({prompt_source}), "
             f"completion_tokens={completion_tokens} (tiktoken), "
+            f"reasoning_tokens={reasoning_tokens} (tiktoken), "
             f"total_tokens={total_tokens} ({total_source})"
         )
         
