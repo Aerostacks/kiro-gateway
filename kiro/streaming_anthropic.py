@@ -135,7 +135,8 @@ async def stream_kiro_to_anthropic(
     request_messages: Optional[list] = None,
     request_tools: Optional[list] = None,
     request_system: Optional[Any] = None,
-    conversation_id: Optional[str] = None
+    conversation_id: Optional[str] = None,
+    intercept_web_search: bool = True
 ) -> AsyncGenerator[str, None]:
     """
     Generator for converting Kiro stream to Anthropic SSE format.
@@ -352,7 +353,7 @@ async def stream_kiro_to_anthropic(
                 # ==============================================================================
                 
                 # INTERCEPT web_search tool calls (Path B - MCP emulation)
-                if tool_name == "web_search":
+                if tool_name == "web_search" and intercept_web_search:
                     from kiro.mcp_tools import call_kiro_mcp_api, generate_search_summary
                     
                     logger.info("Intercepted web_search tool call (Path B - MCP emulation)")
@@ -873,7 +874,8 @@ async def stream_with_first_token_retry_anthropic(
     first_token_timeout: float = FIRST_TOKEN_TIMEOUT,
     request_messages: Optional[list] = None,
     request_tools: Optional[list] = None,
-    request_system: Optional[Any] = None
+    request_system: Optional[Any] = None,
+    intercept_web_search: bool = True
 ) -> AsyncGenerator[str, None]:
     """
     Streaming with automatic retry on first token timeout for Anthropic API.
@@ -934,6 +936,7 @@ async def stream_with_first_token_retry_anthropic(
             request_messages=request_messages,
             request_tools=request_tools,
             request_system=request_system,
+            intercept_web_search=intercept_web_search,
         ):
             yield chunk
     
