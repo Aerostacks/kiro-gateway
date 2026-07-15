@@ -45,6 +45,20 @@ async def test_usage_route_requires_initialized_account(account):
 
 
 @pytest.mark.asyncio
+async def test_usage_route_maps_missing_account_runtime_error_to_unavailable():
+    manager = MagicMock()
+    manager.get_first_account.side_effect = RuntimeError("No initialized accounts")
+    state = SimpleNamespace(account_manager=manager, http_client=MagicMock())
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+
+    with pytest.raises(HTTPException) as exc:
+        await usage(request)
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail == "No initialized accounts available"
+
+
+@pytest.mark.asyncio
 async def test_usage_route_maps_invalid_payload_to_bad_gateway():
     account = SimpleNamespace(auth_manager=MagicMock())
     with patch(

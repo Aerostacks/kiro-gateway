@@ -156,8 +156,14 @@ async def web_search(request: Request):
 
 @router.get("/v1/usage", dependencies=[Depends(verify_api_key)])
 async def usage(request: Request):
-    """Return the current account's normalized monthly Kiro credit usage."""
-    account = request.app.state.account_manager.get_first_account()
+    """Return the first initialized account's normalized monthly credit usage."""
+    try:
+        account = request.app.state.account_manager.get_first_account()
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="No initialized accounts available",
+        ) from exc
     if not account or not account.auth_manager:
         raise HTTPException(status_code=503, detail="No initialized accounts available")
 

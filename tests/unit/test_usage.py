@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
-from kiro.usage import _usage_host, fetch_credit_usage, normalize_usage_payload
+from kiro.usage import fetch_credit_usage, normalize_usage_payload
 
 
 def _payload(**credit_overrides):
@@ -40,6 +40,9 @@ def test_normalize_usage_payload_returns_stable_dashboard_shape():
         {"usageBreakdownList": []},
         _payload(currentUsageWithPrecision=-1),
         _payload(usageLimitWithPrecision=0),
+        _payload(currentUsageWithPrecision=float("nan")),
+        _payload(currentUsageWithPrecision=float("inf")),
+        _payload(usageLimitWithPrecision=float("inf")),
     ],
 )
 def test_normalize_usage_payload_rejects_missing_or_invalid_credit(payload):
@@ -47,18 +50,27 @@ def test_normalize_usage_payload_rejects_missing_or_invalid_credit(payload):
         normalize_usage_payload(payload)
 
 
-def test_usage_host_uses_profile_region_with_safe_default():
-    assert _usage_host(None) == "https://q.us-east-1.amazonaws.com"
-    assert (
-        _usage_host("arn:aws:codewhisperer:eu-west-1:123:profile/example")
-        == "https://q.eu-west-1.amazonaws.com"
+def test_normalize_usage_payload_supports_integer_fallbacks_and_null_reset():
+    result = normalize_usage_payload(
+        _payload(
+            currentUsageWithPrecision=None,
+            usageLimitWithPrecision=None,
+            currentUsage=3,
+            usageLimit=12,
+            nextDateReset=None,
+        )
     )
+    assert result["used"] == 3.0
+    assert result["limit"] == 12.0
+    assert result["percent"] == 25.0
+    assert result["resetsAt"] is None
 
 
 @pytest.mark.asyncio
 async def test_fetch_credit_usage_sends_expected_target_and_payload():
     auth = MagicMock(
         profile_arn="arn:aws:codewhisperer:eu-west-1:123:profile/example",
+        q_host="https://q.us-west-2.amazonaws.com",
         fingerprint="fingerprint",
     )
     auth.get_access_token = AsyncMock(return_value="access-token")
@@ -73,7 +85,7 @@ async def test_fetch_credit_usage_sends_expected_target_and_payload():
     assert result["used"] == 12.5
     url, = client.post.call_args.args
     kwargs = client.post.call_args.kwargs
-    assert url == "https://q.eu-west-1.amazonaws.com"
+    assert url == "https://q.us-west-2.amazonaws.com"
     assert kwargs["headers"]["x-amz-target"] == "AmazonCodeWhispererService.GetUsageLimits"
     assert kwargs["headers"]["Authorization"] == "Bearer access-token"
     assert kwargs["json"]["profileArn"] == auth.profile_arn
@@ -84,6 +96,7 @@ async def test_fetch_credit_usage_sends_expected_target_and_payload():
 async def test_fetch_credit_usage_refreshes_once_after_auth_failure():
     auth = MagicMock(
         profile_arn="arn:aws:codewhisperer:us-east-1:123:profile/example",
+        q_host="https://q.us-east-1.amazonaws.com",
         fingerprint="fingerprint",
     )
     auth.get_access_token = AsyncMock(side_effect=["old-token", "new-token"])
@@ -105,6 +118,7 @@ async def test_fetch_credit_usage_refreshes_once_after_auth_failure():
 async def test_fetch_credit_usage_propagates_second_auth_failure():
     auth = MagicMock(
         profile_arn="arn:aws:codewhisperer:us-east-1:123:profile/example",
+        q_host="https://q.us-east-1.amazonaws.com",
         fingerprint="fingerprint",
     )
     auth.get_access_token = AsyncMock(side_effect=["old-token", "new-token"])

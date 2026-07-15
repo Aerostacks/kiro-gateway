@@ -1,6 +1,7 @@
 """Fetch and normalize Kiro account-level monthly credit usage."""
 
 from datetime import datetime, timezone
+import math
 from typing import Any
 
 import httpx
@@ -18,19 +19,34 @@ def normalize_usage_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if credit is None:
         raise ValueError("Kiro usage response has no CREDIT breakdown")
 
-    used = float(credit.get("currentUsageWithPrecision", credit.get("currentUsage", 0)))
-    limit = float(credit.get("usageLimitWithPrecision", credit.get("usageLimit", 0)))
-    if used < 0 or limit <= 0:
+    used_value = credit.get("currentUsageWithPrecision")
+    if used_value is None:
+        used_value = credit.get("currentUsage", 0)
+    limit_value = credit.get("usageLimitWithPrecision")
+    if limit_value is None:
+        limit_value = credit.get("usageLimit", 0)
+    try:
+        used = float(used_value)
+        limit = float(limit_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Kiro CREDIT breakdown has nonnumeric usage values") from exc
+    if not math.isfinite(used) or not math.isfinite(limit) or used < 0 or limit <= 0:
         raise ValueError("Kiro CREDIT breakdown has invalid usage values")
 
     reset_timestamp = credit.get("nextDateReset", payload.get("nextDateReset"))
     resets_at = None
     if reset_timestamp is not None:
-        resets_at = (
-            datetime.fromtimestamp(float(reset_timestamp), timezone.utc)
-            .isoformat(timespec="seconds")
-            .replace("+00:00", "Z")
-        )
+        try:
+            reset_value = float(reset_timestamp)
+            if not math.isfinite(reset_value):
+                raise ValueError
+            resets_at = (
+                datetime.fromtimestamp(reset_value, timezone.utc)
+                .isoformat(timespec="seconds")
+                .replace("+00:00", "Z")
+            )
+        except (TypeError, ValueError, OverflowError, OSError) as exc:
+            raise ValueError("Kiro CREDIT breakdown has invalid reset timestamp") from exc
 
     subscription = payload.get("subscriptionInfo") or {}
     return {
@@ -42,15 +58,6 @@ def normalize_usage_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _usage_host(profile_arn: str | None) -> str:
-    region = "us-east-1"
-    if profile_arn:
-        parts = profile_arn.split(":")
-        if len(parts) > 3 and parts[3]:
-            region = parts[3]
-    return f"https://q.{region}.amazonaws.com"
-
-
 async def fetch_credit_usage(auth_manager, client: httpx.AsyncClient) -> dict[str, Any]:
     """Call Kiro's GetUsageLimits operation, refreshing once on auth failure."""
     payload = {
@@ -59,7 +66,7 @@ async def fetch_credit_usage(auth_manager, client: httpx.AsyncClient) -> dict[st
         "isEmailRequired": False,
         "profileArn": auth_manager.profile_arn,
     }
-    url = _usage_host(auth_manager.profile_arn)
+    url = auth_manager.q_host
 
     for attempt in range(2):
         token = await auth_manager.get_access_token()
