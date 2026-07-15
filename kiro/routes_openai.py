@@ -27,6 +27,7 @@ Contains all API endpoints:
 """
 
 import json
+import time
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, Security
@@ -52,7 +53,7 @@ from kiro.streaming_openai import stream_kiro_to_openai, collect_stream_response
 from kiro.http_client import KiroHttpClient
 from kiro.utils import generate_conversation_id
 from kiro.config import WEB_SEARCH_ENABLED
-from kiro.mcp_tools import handle_native_web_search
+from kiro.mcp_tools import handle_native_web_search, call_kiro_mcp_api
 
 # Import debug_logger
 try:
@@ -119,6 +120,45 @@ async def health():
         "version": APP_VERSION
     }
 
+@router.post("/v1/web_search", dependencies=[Depends(verify_api_key)])
+async def web_search(request: Request):
+    """
+    Standalone web search endpoint (MCP tool emulation via Kiro /mcp).
+
+    Accepts {"query": "..."} and returns {"results": [...], "totalResults": N,
+    "query": "..."} so non-chat clients (e.g. pi's web_search tool) can search
+    without driving a full chat/completions turn.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    query = (body or {}).get("query", "")
+    if not isinstance(query, str) or not query.strip():
+        raise HTTPException(status_code=400, detail="Missing or empty 'query'")
+
+    account = request.app.state.account_manager.get_first_account()
+    if not account or not account.auth_manager:
+        raise HTTPException(status_code=503, detail="No initialized accounts available")
+
+    _, results = await call_kiro_mcp_api(query.strip(), account.auth_manager)
+    if results is None:
+        raise HTTPException(status_code=502, detail="MCP web_search call failed")
+
+    return JSONResponse(content={
+        "results": results.get("results", []),
+        "totalResults": results.get("totalResults", len(results.get("results", []))),
+        "query": query.strip(),
+    })
+
+
+# The model catalog is process-scoped. Reuse one timestamp so repeated
+# /v1/models responses are stable instead of changing whenever the wall clock
+# crosses a second boundary.
+MODEL_CATALOG_CREATED_AT = int(time.time())
+
+
 @router.get("/v1/models", response_model=ModelList, dependencies=[Depends(verify_api_key)])
 async def get_models(request: Request):
     """
@@ -148,6 +188,7 @@ async def get_models(request: Request):
     openai_models = [
         OpenAIModel(
             id=model_id,
+            created=MODEL_CATALOG_CREATED_AT,
             owned_by="anthropic",
             description="Claude model via Kiro API"
         )

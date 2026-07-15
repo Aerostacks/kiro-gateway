@@ -130,6 +130,8 @@ async def call_kiro_mcp_api(
         "id": request_id,
         "jsonrpc": "2.0",
         "method": "tools/call",
+        # profileArn is required at the JSON-RPC root by runtime.kiro.dev/mcp
+        "profileArn": auth_manager.profile_arn,
         "params": {
             "name": "web_search",
             "arguments": {"query": query}
@@ -151,7 +153,9 @@ async def call_kiro_mcp_api(
         headers = {
             "Authorization": f"Bearer {token}",
             "x-amzn-codewhisperer-optout": "false",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            # Kiro User-Agent is required; without it runtime.kiro.dev/mcp returns 403
+            "User-Agent": f"aws-sdk-js/1.0.27 ua/2.1 os/win32#10.0.19044 lang/js md/nodejs#22.21.1 api/codewhispererstreaming#1.0.27 m/E KiroIDE-0.7.45-{auth_manager.fingerprint}",
         }
         
         mcp_url = f"{auth_manager.q_host}/mcp"
@@ -414,7 +418,7 @@ async def generate_anthropic_web_search_sse(
     # Event N+2: message_delta
     yield format_sse_event("message_delta", {
         "type": "message_delta",
-        "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+        "delta": {"stop_reason": "tool_use", "stop_sequence": None},
         "usage": {"output_tokens": output_tokens}
     })
     
@@ -742,7 +746,7 @@ async def handle_native_web_search(
                     }
                 ],
                 "model": request_data.model,
-                "stop_reason": "end_turn",
+                "stop_reason": "tool_use",
                 "stop_sequence": None,
                 "usage": {
                     "input_tokens": input_tokens,

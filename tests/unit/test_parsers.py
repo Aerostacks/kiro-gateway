@@ -496,6 +496,34 @@ class TestAwsEventStreamParserFeed:
         assert events[0]["type"] == "context_usage"
         assert events[0]["data"] == 25.5
     
+    def test_parses_native_reasoning_event(self, aws_event_parser):
+        """Native Kiro reasoningContentEvent data is preserved."""
+        chunk = b'{"signature":"native-signature","text":"native thought"}'
+
+        events = aws_event_parser.feed(chunk)
+
+        assert events == [{
+            "type": "reasoning",
+            "data": {
+                "text": "native thought",
+                "signature": "native-signature",
+                "redacted_content": None,
+            },
+        }]
+
+    def test_parses_native_reasoning_aliases(self, aws_event_parser):
+        """Older reasoning field names and redacted content remain supported."""
+        chunk = b'{"reasoningText":"thought","signature":"sig","redactedContent":"encrypted"}'
+
+        events = aws_event_parser.feed(chunk)
+
+        assert events[0]["type"] == "reasoning"
+        assert events[0]["data"] == {
+            "text": "thought",
+            "signature": "sig",
+            "redacted_content": "encrypted",
+        }
+
     def test_handles_incomplete_json(self, aws_event_parser):
         """
         What it does: Tests handling of incomplete JSON.

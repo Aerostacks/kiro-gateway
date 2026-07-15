@@ -399,6 +399,13 @@ class TestAnthropicMessageWithImages:
     These tests verify the fix for Issue #30 - 422 Validation Error
     when sending image content blocks in messages.
     """
+
+    def test_system_role_validates_for_compatible_clients(self):
+        """System-role messages are accepted for gateway normalization."""
+        message = AnthropicMessage(role="system", content="Runtime context")
+
+        assert message.role == "system"
+        assert message.content == "Runtime context"
     
     def test_message_with_image_content_validates(self):
         """

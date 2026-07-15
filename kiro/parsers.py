@@ -244,6 +244,9 @@ class AwsEventStreamParser:
         ('{"input":', 'tool_input'),
         ('{"stop":', 'tool_stop'),
         ('{"followupPrompt":', 'followup'),
+        ('{"signature":', 'reasoning'),
+        ('{"reasoningText":', 'reasoning'),
+        ('{"redactedContent":', 'reasoning'),
         ('{"usage":', 'usage'),
         ('{"contextUsagePercentage":', 'context_usage'),
     ]
@@ -324,6 +327,18 @@ class AwsEventStreamParser:
             return self._process_tool_input_event(data)
         elif event_type == 'tool_stop':
             return self._process_tool_stop_event(data)
+        elif event_type == 'reasoning':
+            # Native Kiro reasoningContentEvent. Runtime versions use either
+            # `text` or `reasoningText`; preserve the signed/redacted fields so
+            # protocol adapters can return genuine reasoning blocks.
+            return {
+                "type": "reasoning",
+                "data": {
+                    "text": data.get('text') or data.get('reasoningText') or '',
+                    "signature": data.get('signature'),
+                    "redacted_content": data.get('redactedContent'),
+                },
+            }
         elif event_type == 'usage':
             return {"type": "usage", "data": data.get('usage', 0)}
         elif event_type == 'context_usage':

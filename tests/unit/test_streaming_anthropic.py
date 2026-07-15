@@ -981,6 +981,33 @@ class TestStreamingAnthropicErrorHandling:
 
 class TestStreamingAnthropicThinkingContent:
     """Tests for thinking content handling in Anthropic streaming."""
+
+    @pytest.mark.asyncio
+    async def test_preserves_native_reasoning_signature(self, mock_response, mock_model_cache, mock_auth_manager):
+        """Native Kiro signatures are returned on Anthropic thinking blocks."""
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(
+                type="thinking",
+                thinking_content="native thought",
+                thinking_signature="native-signature",
+            )
+            yield KiroEvent(type="content", content="answer")
+
+        events = []
+        with patch('kiro.streaming_anthropic.parse_kiro_stream', mock_parse_kiro_stream):
+            with patch('kiro.streaming_anthropic.parse_bracket_tool_calls', return_value=[]):
+                with patch('kiro.streaming_anthropic.FAKE_REASONING_HANDLING', 'as_reasoning_content'):
+                    async for event in stream_kiro_to_anthropic(
+                        mock_response, "gpt-5.6-sol", mock_model_cache, mock_auth_manager
+                    ):
+                        events.append(event)
+
+        thinking_start = next(
+            event for event in events
+            if '"type": "thinking"' in event and 'content_block_start' in event
+        )
+        assert '"signature": "native-signature"' in thinking_start
+        assert any('"thinking": "native thought"' in event for event in events)
     
     @pytest.mark.asyncio
     async def test_includes_thinking_as_text_when_configured(self, mock_response, mock_model_cache, mock_auth_manager):

@@ -2,9 +2,9 @@ name: Docker Build and Test
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, dev ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, dev ]
 
 env:
   REGISTRY: ghcr.io

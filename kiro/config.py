@@ -247,7 +247,10 @@ HIDDEN_MODELS: Dict[str, str] = {
 #
 # Default: {"auto-kiro": "auto"} to avoid Cursor IDE conflict
 MODEL_ALIASES: Dict[str, str] = {
-    "claude-opus-4-8": "claude-opus-4.7",  # Alias: 4.8 not yet in Kiro API
+    # Hyphen->dot normalization for the Anthropic-native form clients send
+    # (claude-opus-4-8). Opus 4.8 landed in Kiro 2026-07-14, so this now
+    # points at the real model instead of the 4.7 stopgap it replaced.
+    "claude-opus-4-8": "claude-opus-4.8",
     "auto-kiro": "auto",  # Default alias to avoid Cursor's "auto" model conflict
 }
 
@@ -283,6 +286,13 @@ FALLBACK_MODELS: List[Dict[str, str]] = [
     {"modelId": "claude-opus-4.5"},
     {"modelId": "claude-opus-4.6"},
     {"modelId": "claude-opus-4.7"},
+    {"modelId": "claude-opus-4.8"},
+    # OpenAI GPT-5.6 tiers — added to Kiro 2026-07-14 (kiro.dev/changelog/models/gpt-5-6).
+    # Runtime endpoint has no /ListAvailableModels, so these must live in the fallback list
+    # to be advertised by /v1/models. Live-verified working via direct /v1/messages POST.
+    {"modelId": "gpt-5.6-sol"},
+    {"modelId": "gpt-5.6-terra"},
+    {"modelId": "gpt-5.6-luna"},
     {"modelId": "deepseek-3.2"},
     {"modelId": "glm-5"},
     {"modelId": "minimax-m2.1"},
