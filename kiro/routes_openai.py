@@ -54,6 +54,7 @@ from kiro.http_client import KiroHttpClient
 from kiro.utils import generate_conversation_id
 from kiro.config import WEB_SEARCH_ENABLED
 from kiro.mcp_tools import handle_native_web_search, call_kiro_mcp_api
+from kiro.usage import fetch_credit_usage
 
 # Import debug_logger
 try:
@@ -151,6 +152,28 @@ async def web_search(request: Request):
         "totalResults": results.get("totalResults", len(results.get("results", []))),
         "query": query.strip(),
     })
+
+
+@router.get("/v1/usage", dependencies=[Depends(verify_api_key)])
+async def usage(request: Request):
+    """Return the current account's normalized monthly Kiro credit usage."""
+    account = request.app.state.account_manager.get_first_account()
+    if not account or not account.auth_manager:
+        raise HTTPException(status_code=503, detail="No initialized accounts available")
+
+    try:
+        result = await fetch_credit_usage(
+            account.auth_manager,
+            request.app.state.http_client,
+        )
+    except ValueError as exc:
+        logger.error(f"Invalid Kiro usage response: {exc}")
+        raise HTTPException(status_code=502, detail="Invalid Kiro usage response") from exc
+    except Exception as exc:
+        logger.error(f"Kiro usage request failed: {exc}")
+        raise HTTPException(status_code=502, detail="Kiro usage request failed") from exc
+
+    return JSONResponse(content=result)
 
 
 # The model catalog is process-scoped. Reuse one timestamp so repeated
