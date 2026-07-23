@@ -135,7 +135,7 @@ async def fetch_credit_usage(auth_manager, client: httpx.AsyncClient) -> dict[st
         "isEmailRequired": False,
         "profileArn": auth_manager.profile_arn,
     }
-    url = auth_manager.q_host
+    url = auth_manager.usage_host
 
     for attempt in range(2):
         token = await auth_manager.get_access_token()
