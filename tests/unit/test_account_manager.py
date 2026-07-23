@@ -28,6 +28,7 @@ from kiro.account_manager import (
 from kiro.account_errors import ErrorType
 from kiro.auth import KiroAuthManager, AuthType
 from kiro.cache import ModelInfoCache
+from kiro.config import ACCOUNT_CACHE_TTL
 from kiro.model_resolver import ModelResolver
 
 
@@ -1214,6 +1215,372 @@ class TestAccountManagerGetFirstAccount:
         # Act & Assert
         with pytest.raises(RuntimeError, match="No initialized accounts available"):
             manager.get_first_account()
+
+
+class TestAccountManagerGetAccountsForUsage:
+    @pytest.mark.asyncio
+    async def test_initializes_all_enabled_accounts_without_changing_sticky_index(self, tmp_path):
+        manager = AccountManager(
+            credentials_file=str(tmp_path / "creds.json"),
+            state_file=str(tmp_path / "state.json"),
+        )
+        manager._accounts = {
+            "account-a": Account(id="account-a", auth_manager=MagicMock()),
+            "account-b": Account(id="account-b"),
+        }
+        manager._current_account_index = 1
+
+        async def initialize(account_id):
+            manager._accounts[account_id].auth_manager = MagicMock()
+            return True
+
+        with patch.object(manager, "_initialize_account", side_effect=initialize) as init:
+            accounts = await manager.get_accounts_for_usage()
+
+        assert accounts == list(manager._accounts.values())
+        init.assert_awaited_once_with("account-b")
+        assert manager._current_account_index == 1
+
+    @pytest.mark.asyncio
+    async def test_keeps_accounts_that_cannot_be_initialized_for_partial_counting(self, tmp_path):
+        manager = AccountManager(
+            credentials_file=str(tmp_path / "creds.json"),
+            state_file=str(tmp_path / "state.json"),
+        )
+        manager._accounts = {
+            "account-a": Account(id="account-a", auth_manager=MagicMock()),
+            "account-b": Account(id="account-b"),
+        }
+
+        with patch.object(manager, "_initialize_account", new=AsyncMock(return_value=False)):
+            accounts = await manager.get_accounts_for_usage()
+
+        assert accounts == list(manager._accounts.values())
+
+    @pytest.mark.asyncio
+    async def test_initialization_does_not_hold_manager_lock(self, tmp_path):
+        manager = AccountManager(
+            credentials_file=str(tmp_path / "creds.json"),
+            state_file=str(tmp_path / "state.json"),
+        )
+        manager._accounts = {"account-a": Account(id="account-a")}
+        initialization_started = asyncio.Event()
+        allow_initialization = asyncio.Event()
+
+        async def initialize(_account_id):
+            initialization_started.set()
+            await allow_initialization.wait()
+            return False
+
+        with patch.object(manager, "_initialize_account", side_effect=initialize):
+            usage_task = asyncio.create_task(manager.get_accounts_for_usage())
+            await initialization_started.wait()
+            try:
+                assert manager._lock.locked() is False
+            finally:
+                allow_initialization.set()
+                await usage_task
+
+    @pytest.mark.asyncio
+    async def test_initializes_usage_accounts_concurrently(self, tmp_path):
+        manager = AccountManager(
+            credentials_file=str(tmp_path / "creds.json"),
+            state_file=str(tmp_path / "state.json"),
+        )
+        manager._accounts = {
+            "account-a": Account(id="account-a"),
+            "account-b": Account(id="account-b"),
+        }
+        started = set()
+        both_started = asyncio.Event()
+        allow_initialization = asyncio.Event()
+
+        async def initialize(account_id):
+            started.add(account_id)
+            if len(started) == 2:
+                both_started.set()
+            await allow_initialization.wait()
+            return False
+
+        with patch.object(manager, "_initialize_account", side_effect=initialize):
+            usage_task = asyncio.create_task(manager.get_accounts_for_usage())
+            try:
+                await asyncio.wait_for(both_started.wait(), timeout=1.0)
+            finally:
+                allow_initialization.set()
+                await usage_task
+
+        assert started == {"account-a", "account-b"}
+
+    @pytest.mark.asyncio
+    async def test_failed_usage_initialization_observes_retry_cooldown(self, tmp_path):
+        manager = AccountManager(
+            credentials_file=str(tmp_path / "creds.json"),
+            state_file=str(tmp_path / "state.json"),
+        )
+        manager._accounts = {"account-a": Account(id="account-a")}
+
+        with patch.object(
+            manager,
+            "_initialize_account",
+            new=AsyncMock(return_value=False),
+        ) as initialize:
+            await manager.get_accounts_for_usage()
+            await manager.get_accounts_for_usage()
+
+        initialize.assert_awaited_once_with("account-a")
+
+    @pytest.mark.asyncio
+    async def test_overlapping_usage_polls_share_failed_initialization_cooldown(self, tmp_path):
+        manager = AccountManager(
+            credentials_file=str(tmp_path / "creds.json"),
+            state_file=str(tmp_path / "state.json"),
+        )
+        manager._accounts = {"account-a": Account(id="account-a")}
+        initialization_started = asyncio.Event()
+        allow_initialization = asyncio.Event()
+
+        async def initialize(_account_id):
+            initialization_started.set()
+            await allow_initialization.wait()
+            return False
+
+        with patch.object(manager, "_initialize_account", side_effect=initialize) as init:
+            first = asyncio.create_task(manager.get_accounts_for_usage())
+            await initialization_started.wait()
+            second = asyncio.create_task(manager.get_accounts_for_usage())
+            allow_initialization.set()
+            await asyncio.gather(first, second)
+
+        init.assert_awaited_once_with("account-a")
+
+    @pytest.mark.asyncio
+    async def test_usage_and_request_routing_share_account_initialization(self, tmp_path):
+        manager = AccountManager(
+            credentials_file=str(tmp_path / "creds.json"),
+            state_file=str(tmp_path / "state.json"),
+        )
+        manager._accounts = {"account-a": Account(id="account-a")}
+        initialization_started = asyncio.Event()
+        allow_initialization = asyncio.Event()
+
+        async def initialize(account_id):
+            initialization_started.set()
+            await allow_initialization.wait()
+            manager._accounts[account_id].auth_manager = MagicMock()
+            return True
+
+        with patch.object(manager, "_initialize_account", side_effect=initialize) as init:
+            usage_task = asyncio.create_task(manager.get_accounts_for_usage())
+            await initialization_started.wait()
+            routing_task = asyncio.create_task(manager.get_next_account("claude-sonnet-4"))
+            allow_initialization.set()
+            accounts, routed_account = await asyncio.gather(usage_task, routing_task)
+
+        assert accounts == [manager._accounts["account-a"]]
+        assert routed_account is manager._accounts["account-a"]
+        init.assert_awaited_once_with("account-a")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("first_caller", ["usage", "routing"])
+    async def test_failed_usage_and_routing_overlap_share_one_attempt(
+        self,
+        tmp_path,
+        first_caller,
+    ):
+        manager = AccountManager(
+            credentials_file=str(tmp_path / "creds.json"),
+            state_file=str(tmp_path / "state.json"),
+        )
+        manager._accounts = {"account-a": Account(id="account-a")}
+        initialization_started = asyncio.Event()
+        allow_initialization = asyncio.Event()
+
+        async def initialize(_account_id):
+            initialization_started.set()
+            await allow_initialization.wait()
+            return False
+
+        with patch.object(manager, "_initialize_account", side_effect=initialize) as init:
+            if first_caller == "usage":
+                first = asyncio.create_task(manager.get_accounts_for_usage())
+                await initialization_started.wait()
+                second = asyncio.create_task(manager.get_next_account("claude-sonnet-4"))
+            else:
+                first = asyncio.create_task(manager.get_next_account("claude-sonnet-4"))
+                await initialization_started.wait()
+                second = asyncio.create_task(manager.get_accounts_for_usage())
+
+            await asyncio.sleep(0)
+            allow_initialization.set()
+            await asyncio.gather(first, second)
+
+        init.assert_awaited_once_with("account-a")
+
+    @pytest.mark.asyncio
+    async def test_routing_waiting_on_usage_initialization_does_not_hold_manager_lock(
+        self,
+        tmp_path,
+    ):
+        manager = AccountManager(
+            credentials_file=str(tmp_path / "creds.json"),
+            state_file=str(tmp_path / "state.json"),
+        )
+        manager._accounts = {"account-a": Account(id="account-a")}
+        initialization_started = asyncio.Event()
+        allow_initialization = asyncio.Event()
+
+        async def initialize(account_id):
+            initialization_started.set()
+            await allow_initialization.wait()
+            manager._accounts[account_id].auth_manager = MagicMock()
+            return True
+
+        with patch.object(manager, "_initialize_account", side_effect=initialize):
+            usage_task = asyncio.create_task(manager.get_accounts_for_usage())
+            await initialization_started.wait()
+            routing_task = asyncio.create_task(manager.get_next_account("claude-sonnet-4"))
+            await asyncio.sleep(0)
+            try:
+                await asyncio.wait_for(
+                    manager.report_success("account-a", "claude-sonnet-4"),
+                    timeout=0.5,
+                )
+            finally:
+                allow_initialization.set()
+                await asyncio.gather(usage_task, routing_task)
+
+    @pytest.mark.asyncio
+    async def test_routing_revalidates_circuit_after_refresh(self, tmp_path):
+        manager = AccountManager(
+            credentials_file=str(tmp_path / "creds.json"),
+            state_file=str(tmp_path / "state.json"),
+        )
+        account_a = Account(
+            id="account-a",
+            auth_manager=MagicMock(),
+            models_cached_at=time.time() - ACCOUNT_CACHE_TTL - 1,
+        )
+        account_b = Account(id="account-b", auth_manager=MagicMock())
+        manager._accounts = {"account-a": account_a, "account-b": account_b}
+        refresh_started = asyncio.Event()
+        allow_refresh = asyncio.Event()
+
+        async def refresh(account_id):
+            assert account_id == "account-a"
+            refresh_started.set()
+            await allow_refresh.wait()
+            account_a.models_cached_at = time.time()
+
+        with (
+            patch.object(manager, "_refresh_account_models", side_effect=refresh),
+            patch("kiro.account_manager.random.random", return_value=1.0),
+        ):
+            selection = asyncio.create_task(
+                manager.get_next_account("claude-sonnet-4")
+            )
+            await refresh_started.wait()
+            await manager.report_failure(
+                "account-a",
+                "claude-sonnet-4",
+                ErrorType.RECOVERABLE,
+                429,
+                "THROTTLED",
+            )
+            allow_refresh.set()
+            selected = await selection
+
+        assert selected is account_b
+
+    @pytest.mark.asyncio
+    async def test_routing_revalidates_sticky_index_after_refresh(self, tmp_path):
+        manager = AccountManager(
+            credentials_file=str(tmp_path / "creds.json"),
+            state_file=str(tmp_path / "state.json"),
+        )
+        account_a = Account(
+            id="account-a",
+            auth_manager=MagicMock(),
+            models_cached_at=time.time() - ACCOUNT_CACHE_TTL - 1,
+        )
+        account_b = Account(id="account-b", auth_manager=MagicMock())
+        manager._accounts = {"account-a": account_a, "account-b": account_b}
+        refresh_started = asyncio.Event()
+        allow_refresh = asyncio.Event()
+
+        async def refresh(account_id):
+            assert account_id == "account-a"
+            refresh_started.set()
+            await allow_refresh.wait()
+            account_a.models_cached_at = time.time()
+
+        with patch.object(manager, "_refresh_account_models", side_effect=refresh):
+            selection = asyncio.create_task(
+                manager.get_next_account("claude-sonnet-4")
+            )
+            await refresh_started.wait()
+            await manager.report_success("account-b", "claude-sonnet-4")
+            allow_refresh.set()
+            selected = await selection
+
+        assert selected is account_b
+
+    @pytest.mark.asyncio
+    async def test_cached_initialization_failure_is_counted_once(self, tmp_path):
+        manager = AccountManager(
+            credentials_file=str(tmp_path / "creds.json"),
+            state_file=str(tmp_path / "state.json"),
+        )
+        account = Account(id="account-a")
+        manager._accounts = {"account-a": account}
+
+        with patch.object(
+            manager,
+            "_initialize_account",
+            AsyncMock(return_value=False),
+        ) as initialize:
+            assert await manager.get_next_account("claude-sonnet-4") is None
+            for _ in range(5):
+                assert await manager.get_next_account("claude-sonnet-4") is None
+
+        initialize.assert_awaited_once_with("account-a")
+        assert account.failures == 1
+        assert account.last_failure_time > 0
+
+    @pytest.mark.asyncio
+    async def test_concurrent_stale_cache_refresh_is_singleflight(self, tmp_path):
+        manager = AccountManager(
+            credentials_file=str(tmp_path / "creds.json"),
+            state_file=str(tmp_path / "state.json"),
+        )
+        account = Account(
+            id="account-a",
+            auth_manager=MagicMock(),
+            models_cached_at=time.time() - ACCOUNT_CACHE_TTL - 1,
+        )
+        manager._accounts = {"account-a": account}
+        refresh_started = asyncio.Event()
+        allow_refresh = asyncio.Event()
+
+        async def refresh(account_id):
+            refresh_started.set()
+            await allow_refresh.wait()
+            account.models_cached_at = time.time()
+
+        with patch.object(manager, "_refresh_account_models", side_effect=refresh) as call:
+            first = asyncio.create_task(
+                manager.get_next_account("claude-sonnet-4")
+            )
+            await refresh_started.wait()
+            second = asyncio.create_task(
+                manager.get_next_account("claude-sonnet-4")
+            )
+            await asyncio.sleep(0)
+            allow_refresh.set()
+            selected = await asyncio.gather(first, second)
+
+        assert selected == [account, account]
+        call.assert_awaited_once_with("account-a")
 
 
 class TestAccountManagerGetAllAvailableModels:

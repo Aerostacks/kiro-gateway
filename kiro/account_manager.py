@@ -208,6 +208,9 @@ class AccountManager:
         self._accounts: Dict[str, Account] = {}
         self._model_to_accounts: Dict[str, ModelAccountList] = {}
         self._lock = asyncio.Lock()
+        self._account_initialization_tasks: Dict[str, asyncio.Task] = {}
+        self._account_refresh_tasks: Dict[str, asyncio.Task] = {}
+        self._usage_initialization_failed_at: Dict[str, float] = {}
         self._dirty = False
         self._credentials_config: List[Dict] = []
         self._current_account_index: int = 0  # GLOBAL sticky index for all models
@@ -271,7 +274,9 @@ class AccountManager:
             expanded_path = Path(path).expanduser()
             if expanded_path.is_dir():
                 logger.info(f"Scanning folder for credentials: {path}")
-                for file_path in expanded_path.iterdir():
+                # Stable discovery order keeps public account ordinals stable
+                # without exposing credential filenames or paths.
+                for file_path in sorted(expanded_path.iterdir()):
                     if not file_path.is_file():
                         continue
                     
@@ -642,125 +647,110 @@ class AccountManager:
         finally:
             await http_client.close()
     
+    async def _refresh_account_models_singleflight(self, account_id: str) -> None:
+        """Share one stale-model refresh across overlapping request paths."""
+        task = self._account_refresh_tasks.get(account_id)
+        if task is None:
+            task = asyncio.create_task(self._refresh_account_models(account_id))
+            self._account_refresh_tasks[account_id] = task
+
+            def cleanup(completed: asyncio.Task) -> None:
+                if self._account_refresh_tasks.get(account_id) is completed:
+                    self._account_refresh_tasks.pop(account_id, None)
+
+            task.add_done_callback(cleanup)
+        await asyncio.shield(task)
+
     async def get_next_account(self, model: str, exclude_accounts: Optional[set] = None) -> Optional[Account]:
-        """
-        Get next available account for model (Circuit Breaker + Sticky).
-        
-        Implements:
-        - Sticky behavior (prefer successful account)
-        - Circuit Breaker with exponential backoff
-        - Probabilistic retry for "dead" accounts (10%)
-        - TTL-based model cache refresh
-        - Exclusion of already-tried accounts in current failover loop
-        
-        Args:
-            model: Model name (will be normalized)
-            exclude_accounts: Set of account IDs to exclude (already tried in current failover loop)
-        
-        Returns:
-            Account object or None if no accounts available
-        """
-        async with self._lock:
-            # Special case: single account - bypass Circuit Breaker
-            # Circuit Breaker is meaningless for single account - user should see real Kiro API errors
-            # instead of generic "Account unavailable" after cooldown kicks in
-            if len(self._accounts) == 1:
-                account_id = list(self._accounts.keys())[0]
-                account = self._accounts[account_id]
-                
-                # Skip if already tried in current failover loop
-                if exclude_accounts and account_id in exclude_accounts:
+        """Get the next usable account without holding the manager lock over I/O."""
+        # I/O may overlap report_success/report_failure. Restart from the new
+        # sticky account when that happens, but bound retries to avoid starvation
+        # under continuous traffic.
+        for _selection_attempt in range(3):
+            async with self._lock:
+                if not self._accounts:
                     return None
-                
-                # Lazy initialization if needed
-                if account.auth_manager is None:
-                    success = await self._initialize_account(account_id)
-                    if not success:
+
+                single_account = len(self._accounts) == 1
+                all_account_ids = list(self._accounts.keys())
+                start_index = self._current_account_index
+                if single_account:
+                    account_id = all_account_ids[0]
+                    if exclude_accounts and account_id in exclude_accounts:
                         return None
-                
-                # Check TTL and refresh if needed
-                if account.models_cached_at > 0:
-                    age = time.time() - account.models_cached_at
-                    if age > ACCOUNT_CACHE_TTL:
-                        try:
-                            await self._refresh_account_models(account_id)
-                        except Exception as e:
-                            logger.warning(f"Failed to refresh models for {account_id}: {e}")
-                # # Validate model availability
-                # if account.model_resolver:
-                #     normalized_model = normalize_model_name(model)
-                #     available_models = account.model_resolver.get_available_models()
-                #     if normalized_model not in available_models:
-                #         return None
-                
-                # Always return single account (ignore cooldown/failures)
-                # No model validation - let Kiro API decide (gateway, not gatekeeper)
-                return account
-            
-            # Multi-account logic: GLOBAL sticky
-            normalized_model = normalize_model_name(model)
-            
-            # ALWAYS start from GLOBAL index (one current account for ALL models)
-            start_index = self._current_account_index
-            
-            # ALWAYS iterate over ALL accounts
-            all_account_ids = list(self._accounts.keys())
-            
-            for i in range(len(all_account_ids)):
-                current_index = (start_index + i) % len(all_account_ids)
-                account_id = all_account_ids[current_index]
-                account = self._accounts[account_id]
-                
-                # Skip accounts already tried in current failover loop
-                if exclude_accounts and account_id in exclude_accounts:
-                    continue
-                
-                # Check Circuit Breaker (Half-Open state with exponential backoff)
-                if account.failures > 0:
-                    time_since_failure = time.time() - account.last_failure_time
-                    
-                    # Exponential backoff: base * 2^(failures - 1), capped at MAX_MULTIPLIER
-                    # 1 failure: 60s, 2: 120s, 3: 240s, ..., 12+: 86400s (1 day cap)
-                    backoff_multiplier = min(2 ** (account.failures - 1), ACCOUNT_MAX_BACKOFF_MULTIPLIER)
-                    effective_timeout = ACCOUNT_RECOVERY_TIMEOUT * backoff_multiplier
-                    
-                    if time_since_failure < effective_timeout:
-                        # Probabilistic retry (10% chance)
-                        if random.random() > ACCOUNT_PROBABILISTIC_RETRY_CHANCE:
+                    candidate_ids = [account_id]
+                else:
+                    candidate_ids = []
+                    now = time.time()
+                    for i in range(len(all_account_ids)):
+                        current_index = (start_index + i) % len(all_account_ids)
+                        account_id = all_account_ids[current_index]
+                        account = self._accounts[account_id]
+
+                        if exclude_accounts and account_id in exclude_accounts:
                             continue
-                        else:
-                            logger.info(f"Probabilistic retry for broken account {account_id}")
-                    else:
-                        # Half-Open: recovery timeout passed
-                        logger.info(f"Half-Open state for {account_id} (recovery timeout passed, effective={effective_timeout}s)")
-                
-                # Lazy initialization
+                        if self._account_in_cooldown(account, now):
+                            continue
+                        candidate_ids.append(account_id)
+
+            restart_selection = False
+            for account_id in candidate_ids:
+                account = self._accounts.get(account_id)
+                if not account:
+                    continue
+
                 if account.auth_manager is None:
-                    success = await self._initialize_account(account_id)
-                    if not success:
-                        account.failures += 1
-                        self._dirty = True
+                    if not await self._ensure_account_initialized(account_id):
                         continue
-                
-                # Check TTL and refresh if needed
+
                 if account.models_cached_at > 0:
                     age = time.time() - account.models_cached_at
                     if age > ACCOUNT_CACHE_TTL:
                         try:
-                            await self._refresh_account_models(account_id)
-                        except Exception as e:
-                            logger.warning(f"Failed to refresh models for {account_id}: {e}")
-                # # Check if model is available on this account
-                # available_models = account.model_resolver.get_available_models()
-                # if normalized_model not in available_models:
-                #     continue
-                
-                # No model validation - let Kiro API decide (gateway, not gatekeeper)
-                # Account is suitable!
-                return account
-            
-            # All accounts unavailable
-            return None
+                            await self._refresh_account_models_singleflight(account_id)
+                        except Exception as exc:
+                            logger.warning(f"Failed to refresh models for {account_id}: {exc}")
+
+                async with self._lock:
+                    current = self._accounts.get(account_id)
+                    if not current:
+                        continue
+                    if not single_account and self._current_account_index != start_index:
+                        restart_selection = True
+                        break
+                    if not single_account and self._account_in_cooldown(current, time.time()):
+                        continue
+
+                # Model validation remains delegated to the Kiro API.
+                return current
+
+            if not restart_selection:
+                return None
+
+        logger.warning("Account selection changed repeatedly during initialization/refresh")
+        return None
+
+    @staticmethod
+    def _account_in_cooldown(account: Account, now: float) -> bool:
+        """Return whether circuit state should exclude an account right now."""
+        if account.failures <= 0:
+            return False
+        time_since_failure = now - account.last_failure_time
+        backoff_multiplier = min(
+            2 ** (account.failures - 1),
+            ACCOUNT_MAX_BACKOFF_MULTIPLIER,
+        )
+        effective_timeout = ACCOUNT_RECOVERY_TIMEOUT * backoff_multiplier
+        if time_since_failure >= effective_timeout:
+            logger.info(
+                f"Half-Open state for {account.id} "
+                f"(recovery timeout passed, effective={effective_timeout}s)"
+            )
+            return False
+        if random.random() <= ACCOUNT_PROBABILISTIC_RETRY_CHANCE:
+            logger.info(f"Probabilistic retry for broken account {account.id}")
+            return False
+        return True
     
     async def report_success(self, account_id: str, model: str) -> None:
         """
@@ -865,6 +855,80 @@ class AccountManager:
             # It only changes on success (GLOBAL sticky behavior)
             # Failover happens through exclude_accounts in get_next_account()
     
+    async def _initialize_account_singleflight(self, account_id: str) -> bool:
+        """Share one initialization result across overlapping account callers."""
+        account = self._accounts.get(account_id)
+        if not account:
+            return False
+        if account.auth_manager is not None:
+            return True
+
+        task = self._account_initialization_tasks.get(account_id)
+        failed_at = self._usage_initialization_failed_at.get(account_id)
+        cooldown_active = (
+            failed_at is not None
+            and time.time() - failed_at < ACCOUNT_RECOVERY_TIMEOUT
+        )
+
+        if task is None or task.cancelled() or (task.done() and not cooldown_active):
+            if cooldown_active:
+                return False
+
+            async def initialize() -> bool:
+                success = await self._initialize_account(account_id)
+                if success:
+                    self._usage_initialization_failed_at.pop(account_id, None)
+                else:
+                    failed_at = time.time()
+                    self._usage_initialization_failed_at[account_id] = failed_at
+                    async with self._lock:
+                        current = self._accounts.get(account_id)
+                        if current:
+                            current.failures += 1
+                            current.last_failure_time = failed_at
+                            self._dirty = True
+                return success
+
+            task = asyncio.create_task(initialize())
+            self._account_initialization_tasks[account_id] = task
+
+        return await asyncio.shield(task)
+
+    async def _ensure_account_initialized(self, account_id: str) -> bool:
+        """Initialize an account once when concurrent request paths need it."""
+        return await self._initialize_account_singleflight(account_id)
+
+    async def _initialize_account_for_usage(self, account_id: str) -> bool:
+        """Initialize one usage account, respecting the shared retry cooldown."""
+        return await self._initialize_account_singleflight(account_id)
+
+    async def get_accounts_for_usage(self) -> List[Account]:
+        """Initialize and return every configured account for usage aggregation.
+
+        The manager lock is held only while taking a snapshot. Credential and
+        model network I/O runs concurrently outside it, so usage polling cannot
+        block normal account selection or reporting. Accounts that fail
+        initialization remain in the result for accurate partial counts and are
+        retried after the standard recovery cooldown.
+        """
+        async with self._lock:
+            accounts = list(self._accounts.values())
+            now = time.time()
+            account_ids_to_initialize = [
+                account.id
+                for account in accounts
+                if account.auth_manager is None
+                and now - self._usage_initialization_failed_at.get(account.id, 0.0)
+                >= ACCOUNT_RECOVERY_TIMEOUT
+            ]
+
+        if account_ids_to_initialize:
+            await asyncio.gather(*(
+                self._initialize_account_for_usage(account_id)
+                for account_id in account_ids_to_initialize
+            ))
+        return accounts
+
     def get_first_account(self) -> Account:
         """
         Get first initialized account (for legacy mode).
