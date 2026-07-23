@@ -173,7 +173,8 @@ def test_aggregate_credit_usage_rejects_overflowing_totals():
 async def test_fetch_credit_usage_sends_expected_target_and_payload():
     auth = MagicMock(
         profile_arn="arn:aws:codewhisperer:eu-west-1:123:profile/example",
-        q_host="https://q.us-west-2.amazonaws.com",
+        q_host="https://runtime.us-west-2.kiro.dev",
+        usage_host="https://q.us-west-2.amazonaws.com",
         fingerprint="fingerprint",
     )
     auth.get_access_token = AsyncMock(return_value="access-token")

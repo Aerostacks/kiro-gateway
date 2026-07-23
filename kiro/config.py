@@ -184,6 +184,10 @@ KIRO_API_HOST_TEMPLATE: str = "https://runtime.{region}.kiro.dev"
 # Host for Q API (ListAvailableModels)
 KIRO_Q_HOST_TEMPLATE: str = "https://runtime.{region}.kiro.dev"
 
+# Host for the legacy GetUsageLimits operation. Unlike model and MCP calls,
+# monthly credit usage is still served by the regional AWS Q endpoint.
+KIRO_USAGE_HOST_TEMPLATE: str = "https://q.{region}.amazonaws.com"
+
 # ==================================================================================================
 # Token Settings
 # ==================================================================================================
@@ -589,4 +593,9 @@ def get_kiro_api_host(region: str) -> str:
 def get_kiro_q_host(region: str) -> str:
     """Return Q API host for the specified region."""
     return KIRO_Q_HOST_TEMPLATE.format(region=region)
+
+
+def get_kiro_usage_host(region: str) -> str:
+    """Return monthly credit usage host for the specified API region."""
+    return KIRO_USAGE_HOST_TEMPLATE.format(region=region)
 
