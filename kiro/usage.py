@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 import math
-from typing import Any
+from typing import Any, Iterable
 
 import httpx
 
@@ -55,6 +55,75 @@ def normalize_usage_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "percent": round(min(100.0, max(0.0, used / limit * 100.0)), 6),
         "resetsAt": resets_at,
         "plan": subscription.get("subscriptionTitle"),
+    }
+
+
+def aggregate_credit_usage(
+    usages: Iterable[dict[str, Any]],
+    *,
+    total_accounts: int,
+) -> dict[str, Any]:
+    """Sum valid account windows without fabricating shared plan/reset metadata."""
+    usage_list = list(usages)
+    if not usage_list:
+        raise ValueError("No valid account usage responses")
+    if total_accounts < len(usage_list) or total_accounts <= 0:
+        raise ValueError("Invalid total account count")
+
+    used_values: list[float] = []
+    limit_values: list[float] = []
+    for usage in usage_list:
+        try:
+            used = float(usage["used"])
+            limit = float(usage["limit"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("Account usage has nonnumeric values") from exc
+        if not math.isfinite(used) or not math.isfinite(limit) or used < 0 or limit <= 0:
+            raise ValueError("Account usage has invalid values")
+        used_values.append(used)
+        limit_values.append(limit)
+
+    try:
+        used_total = math.fsum(used_values)
+        limit_total = math.fsum(limit_values)
+    except OverflowError as exc:
+        raise ValueError("Account usage totals overflow") from exc
+    if not math.isfinite(used_total) or not math.isfinite(limit_total):
+        raise ValueError("Account usage totals overflow")
+
+    plans = sorted({
+        usage["plan"]
+        for usage in usage_list
+        if isinstance(usage.get("plan"), str) and usage["plan"]
+    })
+    all_plans_known = all(
+        isinstance(usage.get("plan"), str) and bool(usage["plan"])
+        for usage in usage_list
+    )
+    reset_dates = {usage.get("resetsAt") for usage in usage_list}
+    mixed_reset_dates = len(reset_dates) > 1
+    successful_accounts = len(usage_list)
+    failed_accounts = total_accounts - successful_accounts
+
+    return {
+        "used": used_total,
+        "limit": limit_total,
+        "percent": round(
+            min(100.0, max(0.0, used_total / limit_total * 100.0)),
+            6,
+        ),
+        "resetsAt": next(iter(reset_dates)) if not mixed_reset_dates else None,
+        "plan": (
+            plans[0]
+            if all_plans_known and len(plans) == 1
+            else ("Multiple plans" if all_plans_known and plans else None)
+        ),
+        "plans": plans,
+        "accountCount": total_accounts,
+        "successfulAccountCount": successful_accounts,
+        "failedAccountCount": failed_accounts,
+        "partial": failed_accounts > 0,
+        "mixedResetDates": mixed_reset_dates,
     }
 
 

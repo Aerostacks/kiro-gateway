@@ -4,7 +4,11 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
-from kiro.usage import fetch_credit_usage, normalize_usage_payload
+from kiro.usage import (
+    aggregate_credit_usage,
+    fetch_credit_usage,
+    normalize_usage_payload,
+)
 
 
 def _payload(**credit_overrides):
@@ -64,6 +68,105 @@ def test_normalize_usage_payload_supports_integer_fallbacks_and_null_reset():
     assert result["limit"] == 12.0
     assert result["percent"] == 25.0
     assert result["resetsAt"] is None
+
+
+def test_aggregate_credit_usage_sums_accounts_and_preserves_shared_metadata():
+    result = aggregate_credit_usage([
+        {
+            "used": 25.5,
+            "limit": 100.0,
+            "percent": 25.5,
+            "resetsAt": "2026-08-01T00:00:00Z",
+            "plan": "Pro",
+        },
+        {
+            "used": 50.0,
+            "limit": 200.0,
+            "percent": 25.0,
+            "resetsAt": "2026-08-01T00:00:00Z",
+            "plan": "Pro",
+        },
+    ], total_accounts=2)
+
+    assert result == {
+        "used": 75.5,
+        "limit": 300.0,
+        "percent": 25.166667,
+        "resetsAt": "2026-08-01T00:00:00Z",
+        "plan": "Pro",
+        "plans": ["Pro"],
+        "accountCount": 2,
+        "successfulAccountCount": 2,
+        "failedAccountCount": 0,
+        "partial": False,
+        "mixedResetDates": False,
+    }
+
+
+def test_aggregate_credit_usage_marks_partial_and_does_not_invent_mixed_metadata():
+    result = aggregate_credit_usage([
+        {
+            "used": 10.0,
+            "limit": 100.0,
+            "percent": 10.0,
+            "resetsAt": "2026-08-01T00:00:00Z",
+            "plan": "Pro",
+        },
+        {
+            "used": 30.0,
+            "limit": 50.0,
+            "percent": 60.0,
+            "resetsAt": "2026-08-15T00:00:00Z",
+            "plan": "Power",
+        },
+    ], total_accounts=3)
+
+    assert result["used"] == 40.0
+    assert result["limit"] == 150.0
+    assert result["percent"] == 26.666667
+    assert result["resetsAt"] is None
+    assert result["plan"] == "Multiple plans"
+    assert result["plans"] == ["Power", "Pro"]
+    assert result["accountCount"] == 3
+    assert result["successfulAccountCount"] == 2
+    assert result["failedAccountCount"] == 1
+    assert result["partial"] is True
+    assert result["mixedResetDates"] is True
+
+
+def test_aggregate_credit_usage_requires_at_least_one_valid_account():
+    with pytest.raises(ValueError, match="No valid account usage responses"):
+        aggregate_credit_usage([], total_accounts=2)
+
+
+def test_aggregate_credit_usage_does_not_claim_known_plan_when_an_account_is_unknown():
+    result = aggregate_credit_usage([
+        {
+            "used": 10.0,
+            "limit": 100.0,
+            "resetsAt": "2026-08-01T00:00:00Z",
+            "plan": "Pro",
+        },
+        {
+            "used": 20.0,
+            "limit": 100.0,
+            "resetsAt": "2026-08-01T00:00:00Z",
+            "plan": None,
+        },
+    ], total_accounts=2)
+
+    assert result["plan"] is None
+    assert result["plans"] == ["Pro"]
+
+
+def test_aggregate_credit_usage_rejects_overflowing_totals():
+    usages = [
+        {"used": 1e308, "limit": 1e308, "resetsAt": None, "plan": "Pro"},
+        {"used": 1e308, "limit": 1e308, "resetsAt": None, "plan": "Pro"},
+    ]
+
+    with pytest.raises(ValueError, match="totals overflow"):
+        aggregate_credit_usage(usages, total_accounts=2)
 
 
 @pytest.mark.asyncio
