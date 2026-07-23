@@ -1493,6 +1493,33 @@ class TestAccountManagerGetAccountsForUsage:
         assert selected is account_b
 
     @pytest.mark.asyncio
+    async def test_probabilistic_retry_is_sampled_once_when_circuit_is_unchanged(
+        self,
+        tmp_path,
+    ):
+        manager = AccountManager(
+            credentials_file=str(tmp_path / "creds.json"),
+            state_file=str(tmp_path / "state.json"),
+        )
+        account_a = Account(
+            id="account-a",
+            auth_manager=MagicMock(),
+            failures=1,
+            last_failure_time=time.time(),
+        )
+        account_b = Account(id="account-b", auth_manager=MagicMock())
+        manager._accounts = {"account-a": account_a, "account-b": account_b}
+
+        with patch(
+            "kiro.account_manager.random.random",
+            side_effect=[0.05, 1.0],
+        ) as random_draw:
+            selected = await manager.get_next_account("claude-sonnet-4")
+
+        assert selected is account_a
+        random_draw.assert_called_once_with()
+
+    @pytest.mark.asyncio
     async def test_routing_revalidates_sticky_index_after_refresh(self, tmp_path):
         manager = AccountManager(
             credentials_file=str(tmp_path / "creds.json"),

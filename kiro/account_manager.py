@@ -674,6 +674,7 @@ class AccountManager:
                 single_account = len(self._accounts) == 1
                 all_account_ids = list(self._accounts.keys())
                 start_index = self._current_account_index
+                candidate_circuit_states = {}
                 if single_account:
                     account_id = all_account_ids[0]
                     if exclude_accounts and account_id in exclude_accounts:
@@ -692,6 +693,10 @@ class AccountManager:
                         if self._account_in_cooldown(account, now):
                             continue
                         candidate_ids.append(account_id)
+                        candidate_circuit_states[account_id] = (
+                            account.failures,
+                            account.last_failure_time,
+                        )
 
             restart_selection = False
             for account_id in candidate_ids:
@@ -718,8 +723,17 @@ class AccountManager:
                     if not single_account and self._current_account_index != start_index:
                         restart_selection = True
                         break
-                    if not single_account and self._account_in_cooldown(current, time.time()):
-                        continue
+                    if not single_account:
+                        initial_circuit_state = candidate_circuit_states[account_id]
+                        current_circuit_state = (
+                            current.failures,
+                            current.last_failure_time,
+                        )
+                        if (
+                            current_circuit_state != initial_circuit_state
+                            and self._account_in_cooldown(current, time.time())
+                        ):
+                            continue
 
                 # Model validation remains delegated to the Kiro API.
                 return current
