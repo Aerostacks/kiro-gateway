@@ -65,6 +65,9 @@ class TestKiroAuthManagerInitialization:
         
         print(f"Comparing q_host: Expected 'eu-west-1' in URL, Got '{manager._q_host}'")
         assert "eu-west-1" in manager._q_host
+
+        print("Verification: Usage host uses the regional AWS Q endpoint...")
+        assert manager.usage_host == "https://q.eu-west-1.amazonaws.com"
     
     def test_initialization_generates_fingerprint(self):
         """

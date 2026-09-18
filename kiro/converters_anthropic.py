@@ -24,7 +24,7 @@ This module is an adapter layer that converts Anthropic-specific formats
 to the unified format used by converters_core.py.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
@@ -336,6 +336,38 @@ def convert_anthropic_messages(
     return unified_messages
 
 
+def normalize_anthropic_messages(
+    messages: List[AnthropicMessage],
+) -> Tuple[List[AnthropicMessage], str]:
+    """Separate embedded system messages from conversation messages.
+
+    Anthropic's public API normally carries system content in the top-level
+    ``system`` field. Some compatible clients, including Claude Code in
+    specific flows, also emit system-role entries in ``messages``. Kiro cannot
+    represent those entries in conversation history, so preserve their text as
+    system prompt content instead.
+
+    Args:
+        messages: Anthropic-compatible request messages.
+
+    Returns:
+        A tuple containing user/assistant messages and the combined embedded
+        system prompt text.
+    """
+    conversation_messages: List[AnthropicMessage] = []
+    system_parts: List[str] = []
+
+    for message in messages:
+        if message.role == "system":
+            system_text = convert_anthropic_content_to_text(message.content)
+            if system_text:
+                system_parts.append(system_text)
+            continue
+        conversation_messages.append(message)
+
+    return conversation_messages, "\n\n".join(system_parts)
+
+
 def convert_anthropic_tools(
     tools: Optional[List[AnthropicTool]],
 ) -> Optional[List[UnifiedTool]]:
@@ -450,8 +482,12 @@ def anthropic_to_kiro(
     Raises:
         ValueError: If there are no messages to send
     """
-    # Convert messages to unified format
-    unified_messages = convert_anthropic_messages(request.messages)
+    # Compatible clients may place system entries inside messages even though
+    # the native Anthropic API uses the top-level system field.
+    conversation_messages, embedded_system_prompt = normalize_anthropic_messages(
+        request.messages
+    )
+    unified_messages = convert_anthropic_messages(conversation_messages)
 
     # Convert tools to unified format
     unified_tools = convert_anthropic_tools(request.tools)
@@ -459,6 +495,10 @@ def anthropic_to_kiro(
     # System prompt is already separate in Anthropic format!
     # It can be a string or list of content blocks (for prompt caching)
     system_prompt = extract_system_prompt(request.system)
+    if embedded_system_prompt:
+        system_prompt = "\n\n".join(
+            part for part in (system_prompt, embedded_system_prompt) if part
+        )
 
     # Get model ID for Kiro API (normalizes + resolves hidden models)
     # Pass-through principle: we normalize and send to Kiro, Kiro decides if valid

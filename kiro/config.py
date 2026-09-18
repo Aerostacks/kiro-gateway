@@ -184,6 +184,10 @@ KIRO_API_HOST_TEMPLATE: str = "https://runtime.{region}.kiro.dev"
 # Host for Q API (ListAvailableModels)
 KIRO_Q_HOST_TEMPLATE: str = "https://runtime.{region}.kiro.dev"
 
+# Host for the legacy GetUsageLimits operation. Unlike model and MCP calls,
+# monthly credit usage is still served by the regional AWS Q endpoint.
+KIRO_USAGE_HOST_TEMPLATE: str = "https://q.{region}.amazonaws.com"
+
 # ==================================================================================================
 # Token Settings
 # ==================================================================================================
@@ -247,7 +251,10 @@ HIDDEN_MODELS: Dict[str, str] = {
 #
 # Default: {"auto-kiro": "auto"} to avoid Cursor IDE conflict
 MODEL_ALIASES: Dict[str, str] = {
-    "claude-opus-4-8": "claude-opus-4.7",  # Alias: 4.8 not yet in Kiro API
+    # Hyphen->dot normalization for the Anthropic-native form clients send
+    # (claude-opus-4-8). Opus 4.8 landed in Kiro 2026-07-14, so this now
+    # points at the real model instead of the 4.7 stopgap it replaced.
+    "claude-opus-4-8": "claude-opus-4.8",
     "auto-kiro": "auto",  # Default alias to avoid Cursor's "auto" model conflict
 }
 
@@ -283,6 +290,13 @@ FALLBACK_MODELS: List[Dict[str, str]] = [
     {"modelId": "claude-opus-4.5"},
     {"modelId": "claude-opus-4.6"},
     {"modelId": "claude-opus-4.7"},
+    {"modelId": "claude-opus-4.8"},
+    # OpenAI GPT-5.6 tiers — added to Kiro 2026-07-14 (kiro.dev/changelog/models/gpt-5-6).
+    # Runtime endpoint has no /ListAvailableModels, so these must live in the fallback list
+    # to be advertised by /v1/models. Live-verified working via direct /v1/messages POST.
+    {"modelId": "gpt-5.6-sol"},
+    {"modelId": "gpt-5.6-terra"},
+    {"modelId": "gpt-5.6-luna"},
     {"modelId": "deepseek-3.2"},
     {"modelId": "glm-5"},
     {"modelId": "minimax-m2.1"},
@@ -299,6 +313,11 @@ MODEL_CACHE_TTL: int = 3600
 
 # Default maximum number of input tokens
 DEFAULT_MAX_INPUT_TOKENS: int = 200000
+
+# Public and enforced gateway context window. This deliberately stays below
+# GPT-5.6's long-context pricing threshold so a client metadata update cannot
+# silently opt requests into the substantially more expensive 1.05M tier.
+MAX_CONTEXT_WINDOW_TOKENS: int = 272000
 
 # ==================================================================================================
 # Tool Description Handling (Kiro API Limitations)
@@ -580,3 +599,7 @@ def get_kiro_q_host(region: str) -> str:
     """Return Q API host for the specified region."""
     return KIRO_Q_HOST_TEMPLATE.format(region=region)
 
+
+def get_kiro_usage_host(region: str) -> str:
+    """Return monthly credit usage host for the specified API region."""
+    return KIRO_USAGE_HOST_TEMPLATE.format(region=region)

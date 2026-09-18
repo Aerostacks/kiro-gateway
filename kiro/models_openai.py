@@ -29,6 +29,8 @@ from typing import Any, Dict, List, Literal, Optional, Union
 from typing_extensions import Annotated
 from pydantic import BaseModel, Field
 
+from kiro.config import MAX_CONTEXT_WINDOW_TOKENS
+
 
 # ==================================================================================================
 # Models for /v1/models endpoint
@@ -45,6 +47,7 @@ class OpenAIModel(BaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
     owned_by: str = "anthropic"
     description: Optional[str] = None
+    context_window: int = MAX_CONTEXT_WINDOW_TOKENS
 
 
 class ModelList(BaseModel):

@@ -162,6 +162,37 @@ class ImageContentBlock(BaseModel):
     source: Union[Base64ImageSource, URLImageSource]
 
 
+class ServerToolUseContentBlock(BaseModel):
+    """
+    Server-side tool use block (native Anthropic web_search, "Path A").
+
+    Emitted by the gateway when it runs a server-side tool. Replayed back by
+    clients (e.g. Claude Code) in subsequent turns, so it must validate on input.
+    """
+
+    type: Literal["server_tool_use"] = "server_tool_use"
+    id: str
+    name: str
+    input: Dict[str, Any]
+
+    model_config = {"extra": "allow"}
+
+
+class WebSearchToolResultContentBlock(BaseModel):
+    """
+    Web search tool result block (native Anthropic web_search, "Path A").
+
+    Carries the server-side search results. Content is left permissive since the
+    gateway does not re-interpret it; it is inert history on replay.
+    """
+
+    type: Literal["web_search_tool_result"] = "web_search_tool_result"
+    tool_use_id: str
+    content: Optional[Any] = None
+
+    model_config = {"extra": "allow"}
+
+
 # Union type for all content blocks (including images and thinking)
 ContentBlock = Union[
     TextContentBlock,
@@ -170,6 +201,8 @@ ContentBlock = Union[
     ToolUseContentBlock,
     ToolResultContentBlock,
     ToolReferenceContentBlock,
+    ServerToolUseContentBlock,
+    WebSearchToolResultContentBlock,
 ]
 
 
@@ -183,11 +216,11 @@ class AnthropicMessage(BaseModel):
     Message in Anthropic format.
 
     Attributes:
-        role: Message role (user or assistant)
+        role: Message role (user, assistant, or system for gateway compatibility)
         content: Message content (string or list of content blocks)
     """
 
-    role: Literal["user", "assistant"]
+    role: Literal["user", "assistant", "system"]
     content: Union[str, List[ContentBlock]]
 
     model_config = {"extra": "allow"}

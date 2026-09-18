@@ -36,6 +36,8 @@ import json
 from typing import List, Dict, Any, Optional
 from loguru import logger
 
+from kiro.config import MAX_CONTEXT_WINDOW_TOKENS
+
 # Lazy loading of tiktoken to speed up import
 _encoding = None
 
@@ -43,6 +45,25 @@ _encoding = None
 # Claude tokenizes text approximately 15% more than GPT-4 (cl100k_base)
 # This is an empirical value based on comparison with context_usage from API
 CLAUDE_CORRECTION_FACTOR = 1.15
+
+
+class ContextWindowExceededError(ValueError):
+    """Raised when a request exceeds the gateway context window."""
+
+    def __init__(self, estimated_tokens: int, max_tokens: int) -> None:
+        """Initialize an actionable context-window error.
+
+        Args:
+            estimated_tokens: Estimated input tokens in the request.
+            max_tokens: Maximum input tokens accepted by the gateway.
+        """
+        self.estimated_tokens = estimated_tokens
+        self.max_tokens = max_tokens
+        super().__init__(
+            f"Request context is approximately {estimated_tokens:,} input tokens; "
+            f"the Kiro Gateway limit is {max_tokens:,}. Shorten or compact the "
+            "conversation before retrying."
+        )
 
 
 def _get_encoding():
@@ -325,3 +346,42 @@ def estimate_request_tokens(
         "system_tokens": system_tokens,
         "total_tokens": messages_tokens + tools_tokens + system_tokens
     }
+
+
+def enforce_context_window(
+    messages: List[Dict[str, Any]],
+    tools: Optional[List[Dict[str, Any]]] = None,
+    system_prompt: Optional[Any] = None,
+    max_tokens: int = MAX_CONTEXT_WINDOW_TOKENS,
+) -> int:
+    """Reject requests whose estimated input exceeds the gateway limit.
+
+    The estimate uses the same conservative tokenizer used for response usage
+    reporting. Validation happens before account selection or any upstream
+    request, so rejected prompts cannot consume Kiro credits.
+
+    Args:
+        messages: Request messages in OpenAI or Anthropic dictionary form.
+        tools: Optional tool definitions included in the request.
+        system_prompt: Optional separate Anthropic system prompt.
+        max_tokens: Maximum accepted estimated input tokens.
+
+    Returns:
+        Estimated input-token count when the request is within the limit.
+
+    Raises:
+        ContextWindowExceededError: If the estimate is greater than max_tokens.
+    """
+    token_stats = estimate_request_tokens(
+        messages=messages,
+        tools=tools,
+        system_prompt=system_prompt,
+    )
+    estimated_tokens = token_stats["total_tokens"]
+    if estimated_tokens > max_tokens:
+        logger.warning(
+            "Rejecting request above context window: "
+            f"estimated_tokens={estimated_tokens}, max_tokens={max_tokens}"
+        )
+        raise ContextWindowExceededError(estimated_tokens, max_tokens)
+    return estimated_tokens

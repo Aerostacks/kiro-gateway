@@ -22,6 +22,7 @@ from kiro.converters_anthropic import (
     extract_images_from_tool_results,
     extract_tool_uses_from_anthropic_content,
     convert_anthropic_messages,
+    normalize_anthropic_messages,
     convert_anthropic_tools,
     anthropic_to_kiro,
     extract_thinking_config_from_anthropic,
@@ -1099,6 +1100,23 @@ class TestConvertAnthropicMessages:
         print(f"Comparing result: Expected [], Got {result}")
         assert result == []
 
+    def test_normalizes_embedded_system_messages(self):
+        """Embedded system content is removed from conversation history."""
+        messages = [
+            AnthropicMessage(role="user", content="Hello"),
+            AnthropicMessage(
+                role="system",
+                content=[{"type": "text", "text": "Runtime context"}],
+            ),
+            AnthropicMessage(role="assistant", content="Hi"),
+            AnthropicMessage(role="system", content="Additional policy"),
+        ]
+
+        conversation, system_prompt = normalize_anthropic_messages(messages)
+
+        assert [message.role for message in conversation] == ["user", "assistant"]
+        assert system_prompt == "Runtime context\n\nAdditional policy"
+
     # ==================================================================================
     # Image extraction tests (Issue #30 fix)
     # ==================================================================================
@@ -1498,6 +1516,31 @@ class TestAnthropicToKiro:
         ]["content"]
         print(f"Current content: {current_content}")
         assert "You are a helpful assistant." in current_content
+
+    def test_merges_embedded_and_top_level_system_prompts(self):
+        """Claude Code-style system messages are preserved outside history."""
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4-5",
+            messages=[
+                AnthropicMessage(role="user", content="Hello!"),
+                AnthropicMessage(role="system", content="Runtime context"),
+            ],
+            max_tokens=1024,
+            system="Primary policy",
+        )
+
+        with patch(
+            "kiro.converters_anthropic.get_model_id_for_kiro",
+            return_value="claude-sonnet-4.5",
+        ):
+            with patch("kiro.converters_core.FAKE_REASONING_ENABLED", False):
+                result = anthropic_to_kiro(request, "conv-123", "arn:aws:test")
+
+        current_content = result["conversationState"]["currentMessage"][
+            "userInputMessage"
+        ]["content"]
+        assert "Primary policy\n\nRuntime context" in current_content
+        assert result["conversationState"].get("history", []) == []
 
     def test_includes_tools(self):
         """
