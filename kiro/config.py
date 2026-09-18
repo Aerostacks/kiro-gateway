@@ -314,6 +314,11 @@ MODEL_CACHE_TTL: int = 3600
 # Default maximum number of input tokens
 DEFAULT_MAX_INPUT_TOKENS: int = 200000
 
+# Public and enforced gateway context window. This deliberately stays below
+# GPT-5.6's long-context pricing threshold so a client metadata update cannot
+# silently opt requests into the substantially more expensive 1.05M tier.
+MAX_CONTEXT_WINDOW_TOKENS: int = 272000
+
 # ==================================================================================================
 # Tool Description Handling (Kiro API Limitations)
 # ==================================================================================================
@@ -598,4 +603,3 @@ def get_kiro_q_host(region: str) -> str:
 def get_kiro_usage_host(region: str) -> str:
     """Return monthly credit usage host for the specified API region."""
     return KIRO_USAGE_HOST_TEMPLATE.format(region=region)
-

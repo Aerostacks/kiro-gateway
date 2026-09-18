@@ -16,14 +16,57 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 from kiro.tokenizer import (
+    ContextWindowExceededError,
     count_tokens,
     count_message_tokens,
     count_tools_tokens,
     count_system_tokens,
+    enforce_context_window,
     estimate_request_tokens,
     CLAUDE_CORRECTION_FACTOR,
     _get_encoding
 )
+
+
+class TestEnforceContextWindow:
+    """Tests for the gateway's request context guard."""
+
+    @patch("kiro.tokenizer.estimate_request_tokens")
+    def test_accepts_request_at_exact_limit(self, mock_estimate):
+        """The documented limit itself remains usable."""
+        mock_estimate.return_value = {"total_tokens": 272000}
+
+        result = enforce_context_window([{"role": "user", "content": "ok"}])
+
+        assert result == 272000
+
+    @patch("kiro.tokenizer.estimate_request_tokens")
+    def test_rejects_request_one_token_over_limit(self, mock_estimate):
+        """One estimated token over the limit is rejected."""
+        mock_estimate.return_value = {"total_tokens": 272001}
+
+        with pytest.raises(ContextWindowExceededError) as exc_info:
+            enforce_context_window([{"role": "user", "content": "too large"}])
+
+        assert exc_info.value.estimated_tokens == 272001
+        assert exc_info.value.max_tokens == 272000
+        assert "Shorten or compact" in str(exc_info.value)
+
+    @patch("kiro.tokenizer.estimate_request_tokens")
+    def test_counts_messages_tools_and_system_prompt(self, mock_estimate):
+        """All billable input sections are included in validation."""
+        mock_estimate.return_value = {"total_tokens": 42}
+        messages = [{"role": "user", "content": "hello"}]
+        tools = [{"name": "lookup", "input_schema": {"type": "object"}}]
+        system = "Be concise."
+
+        enforce_context_window(messages, tools=tools, system_prompt=system)
+
+        mock_estimate.assert_called_once_with(
+            messages=messages,
+            tools=tools,
+            system_prompt=system,
+        )
 
 
 class TestCountTokens:

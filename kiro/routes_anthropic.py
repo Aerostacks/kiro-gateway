@@ -52,7 +52,11 @@ from kiro.streaming_anthropic import (
 )
 from kiro.http_client import KiroHttpClient
 from kiro.utils import generate_conversation_id
-from kiro.tokenizer import estimate_request_tokens
+from kiro.tokenizer import (
+    ContextWindowExceededError,
+    enforce_context_window,
+    estimate_request_tokens,
+)
 from kiro.config import WEB_SEARCH_ENABLED
 from kiro.mcp_tools import handle_native_web_search
 
@@ -146,6 +150,40 @@ async def messages(
         HTTPException: On validation or API errors
     """
     logger.info(f"Request to /v1/messages (model={request_data.model}, stream={request_data.stream})")
+
+    messages_for_limit = [message.model_dump(exclude_none=True) for message in request_data.messages]
+    tools_for_limit = (
+        [tool.model_dump(exclude_none=True) for tool in request_data.tools]
+        if request_data.tools
+        else None
+    )
+    system_for_limit = (
+        [
+            block.model_dump(exclude_none=True)
+            if hasattr(block, "model_dump")
+            else block
+            for block in request_data.system
+        ]
+        if isinstance(request_data.system, list)
+        else request_data.system
+    )
+    try:
+        enforce_context_window(
+            messages_for_limit,
+            tools=tools_for_limit,
+            system_prompt=system_for_limit,
+        )
+    except ContextWindowExceededError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": str(exc),
+                },
+            },
+        )
     
     if anthropic_version:
         logger.debug(f"Anthropic-Version header: {anthropic_version}")

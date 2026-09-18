@@ -380,6 +380,17 @@ class TestModelsEndpoint:
         for model in response.json()["data"]:
             assert model["owned_by"] == "anthropic"
 
+    def test_models_advertise_gateway_context_window(self, test_client, valid_proxy_api_key):
+        """Every advertised model reports the enforced 272k context window."""
+        response = test_client.get(
+            "/v1/models",
+            headers={"Authorization": f"Bearer {valid_proxy_api_key}"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["data"]
+        assert all(model["context_window"] == 272000 for model in response.json()["data"])
+
 
 # =============================================================================
 # Tests for chat completions endpoint (/v1/chat/completions)
@@ -444,6 +455,34 @@ class TestChatCompletionsValidation:
         
         print(f"Status: {response.status_code}")
         assert response.status_code == 422
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_rejects_context_over_272k_before_upstream_request(
+        self,
+        test_client,
+        valid_proxy_api_key,
+        stream,
+    ):
+        """Oversized streaming and non-streaming requests fail before routing."""
+        from kiro.tokenizer import ContextWindowExceededError
+
+        with patch(
+            "kiro.routes_openai.enforce_context_window",
+            side_effect=ContextWindowExceededError(272001, 272000),
+        ):
+            response = test_client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": f"Bearer {valid_proxy_api_key}"},
+                json={
+                    "model": "gpt-5.6-sol",
+                    "messages": [{"role": "user", "content": "large context"}],
+                    "stream": stream,
+                },
+            )
+
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "context_length_exceeded"
+        assert "272,000" in response.json()["error"]["message"]
     
     def test_validates_missing_model(self, test_client, valid_proxy_api_key):
         """

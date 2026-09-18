@@ -377,6 +377,36 @@ class TestMessagesValidation:
         # Should pass validation (not 422)
         assert response.status_code != 422
 
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_rejects_context_over_272k_before_upstream_request(
+        self,
+        test_client,
+        valid_proxy_api_key,
+        stream,
+    ):
+        """Oversized streaming and non-streaming requests use Anthropic errors."""
+        from kiro.tokenizer import ContextWindowExceededError
+
+        with patch(
+            "kiro.routes_anthropic.enforce_context_window",
+            side_effect=ContextWindowExceededError(272001, 272000),
+        ):
+            response = test_client.post(
+                "/v1/messages",
+                headers={"x-api-key": valid_proxy_api_key},
+                json={
+                    "model": "gpt-5.6-sol",
+                    "max_tokens": 1024,
+                    "messages": [{"role": "user", "content": "large context"}],
+                    "stream": stream,
+                },
+            )
+
+        assert response.status_code == 400
+        assert response.json()["type"] == "error"
+        assert response.json()["error"]["type"] == "invalid_request_error"
+        assert "272,000" in response.json()["error"]["message"]
+
 
 # =============================================================================
 # Tests for /v1/messages system prompt

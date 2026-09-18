@@ -56,6 +56,7 @@ from kiro.utils import generate_conversation_id
 from kiro.config import WEB_SEARCH_ENABLED
 from kiro.mcp_tools import handle_native_web_search, call_kiro_mcp_api
 from kiro.usage import aggregate_credit_usage, fetch_credit_usage
+from kiro.tokenizer import ContextWindowExceededError, enforce_context_window
 
 # Import debug_logger
 try:
@@ -310,6 +311,27 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
         HTTPException: On validation or API errors
     """
     logger.info(f"Request to /v1/chat/completions (model={request_data.model}, stream={request_data.stream})")
+
+    messages_for_limit = [message.model_dump(exclude_none=True) for message in request_data.messages]
+    tools_for_limit = (
+        [tool.model_dump(exclude_none=True) for tool in request_data.tools]
+        if request_data.tools
+        else None
+    )
+    try:
+        enforce_context_window(messages_for_limit, tools=tools_for_limit)
+    except ContextWindowExceededError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": {
+                    "message": str(exc),
+                    "type": "invalid_request_error",
+                    "param": "messages",
+                    "code": "context_length_exceeded",
+                }
+            },
+        )
     
     # Note: prepare_new_request() and log_request_body() are now called by DebugLoggerMiddleware
     # This ensures debug logging works even for requests that fail Pydantic validation (422 errors)

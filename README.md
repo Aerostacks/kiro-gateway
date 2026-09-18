@@ -566,6 +566,12 @@ Leave `VPN_PROXY_URL` empty (default) if you don't need proxy support.
 | `/v1/chat/completions` | POST | OpenAI Chat Completions API |
 | `/v1/messages` | POST | Anthropic Messages API |
 
+The gateway's official context window is **272,000 input tokens** for every
+advertised model. `/v1/models` exposes this as `context_window: 272000`, and
+both generation APIs reject larger requests before contacting Kiro. This cap
+prevents client model-catalog updates from silently enabling long-context
+pricing tiers.
+
 ---
 
 ## 💡 Usage Examples
