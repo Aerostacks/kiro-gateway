@@ -339,6 +339,54 @@ For a single account, failover doesn't work — you get the original error from 
 
 For complete configuration examples (including per-account region settings), see [`credentials.json.example`](credentials.json.example).
 
+### Docker multi-account setup
+
+The container deliberately removes `credentials.json` from the image, so mount the account configuration at runtime and keep each underlying credential file/database mounted at the path referenced by that configuration:
+
+```yaml
+services:
+  kiro-gateway:
+    environment:
+      ACCOUNT_SYSTEM: "true"
+      ACCOUNTS_CONFIG_FILE: /run/kiro/credentials.json
+      ACCOUNTS_STATE_FILE: /app/data/account-state.json
+    volumes:
+      - ./credentials.json:/run/kiro/credentials.json:ro
+      - ${HOME}/.aws/sso/cache:/home/kiro/.aws/sso/cache:rw
+      - ./data:/app/data:rw
+```
+
+Example `credentials.json`:
+
+```json
+[
+  {
+    "type": "json",
+    "path": "/home/kiro/.aws/sso/cache/account-one.json",
+    "enabled": true
+  },
+  {
+    "type": "json",
+    "path": "/home/kiro/.aws/sso/cache/account-two.json",
+    "enabled": true
+  }
+]
+```
+
+Each entry may instead use `sqlite` or `refresh_token` as shown above. Never bake credential files or refresh tokens into a container image.
+
+### Multi-account credit usage
+
+`GET /v1/usage` retains the original scalar fields (`used`, `limit`, `percent`, `resetsAt`, and `plan`). It initializes every enabled account, fetches usage concurrently, and sums both used and available monthly credits. It also returns:
+
+- `accountCount`, `successfulAccountCount`, `failedAccountCount`
+- `partial` — `true` when at least one configured account could not be counted
+- `plans` — unique plan names across responding accounts
+- `mixedResetDates` — `true` when accounts reset on different dates
+- `accounts` — one row per enabled account with an anonymous ordinal ID (`account-1`, `account-2`, …), `available`, and per-account usage when available
+
+The configured account order is stable, including sorted folder discovery, so ordinal labels remain suitable for dashboards without exposing credential filenames, paths, tokens, or user identifiers. Unavailable accounts remain present with `available: false` and are excluded from totals. When reset dates differ, aggregate `resetsAt` is `null`; when plans differ, aggregate `plan` is `"Multiple plans"`. If every account fails, the endpoint returns HTTP 502 instead of presenting a misleading zero total.
+
 ---
 
 ## 🐳 Docker Deployment

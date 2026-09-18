@@ -648,6 +648,28 @@ class TestProcessChunk:
         print("✓ Thinking parser integration works correctly")
     
     @pytest.mark.asyncio
+    async def test_yields_native_reasoning_content(self, mock_parser):
+        """Native reasoning events bypass fake-tag parsing and retain metadata."""
+        mock_parser.feed.return_value = [{
+            "type": "reasoning",
+            "data": {
+                "text": "native thought",
+                "signature": "native-signature",
+                "redacted_content": "encrypted",
+            },
+        }]
+
+        events = []
+        async for event in _process_chunk(mock_parser, b'chunk', None):
+            events.append(event)
+
+        assert len(events) == 1
+        assert events[0].type == "thinking"
+        assert events[0].thinking_content == "native thought"
+        assert events[0].thinking_signature == "native-signature"
+        assert events[0].redacted_thinking_content == "encrypted"
+
+    @pytest.mark.asyncio
     async def test_yields_thinking_content(self, mock_parser):
         """
         What it does: Yields thinking content from thinking parser.
@@ -818,7 +840,12 @@ class TestCollectStreamToResult:
         
         # Create mock events that include thinking
         mock_events = [
-            KiroEvent(type="thinking", thinking_content="Let me think..."),
+            KiroEvent(
+                type="thinking",
+                thinking_content="Let me think...",
+                thinking_signature="native-signature",
+                redacted_thinking_content="encrypted",
+            ),
             KiroEvent(type="content", content="Here is my answer")
         ]
         
@@ -835,6 +862,8 @@ class TestCollectStreamToResult:
         print(f"Collected thinking_content: '{result.thinking_content}'")
         print(f"Collected content: '{result.content}'")
         assert result.thinking_content == "Let me think..."
+        assert result.thinking_signature == "native-signature"
+        assert result.redacted_thinking_content == "encrypted"
         assert result.content == "Here is my answer"
         print("✓ Thinking content collected correctly")
     

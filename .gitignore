@@ -1,8 +1,11 @@
 # Environment
 .env
 .env.local
+.env.bak-*
 credentials.json
 state.json
+.native-reasoning-backup-*/
+kiro/*.bak-*
 
 # IDE
 .vscode/

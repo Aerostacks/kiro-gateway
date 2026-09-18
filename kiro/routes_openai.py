@@ -26,7 +26,9 @@ Contains all API endpoints:
 - /v1/chat/completions: Chat completions
 """
 
+import asyncio
 import json
+import time
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, Security
@@ -52,7 +54,8 @@ from kiro.streaming_openai import stream_kiro_to_openai, collect_stream_response
 from kiro.http_client import KiroHttpClient
 from kiro.utils import generate_conversation_id
 from kiro.config import WEB_SEARCH_ENABLED
-from kiro.mcp_tools import handle_native_web_search
+from kiro.mcp_tools import handle_native_web_search, call_kiro_mcp_api
+from kiro.usage import aggregate_credit_usage, fetch_credit_usage
 
 # Import debug_logger
 try:
@@ -119,6 +122,135 @@ async def health():
         "version": APP_VERSION
     }
 
+@router.post("/v1/web_search", dependencies=[Depends(verify_api_key)])
+async def web_search(request: Request):
+    """
+    Standalone web search endpoint (MCP tool emulation via Kiro /mcp).
+
+    Accepts {"query": "..."} and returns {"results": [...], "totalResults": N,
+    "query": "..."} so non-chat clients (e.g. pi's web_search tool) can search
+    without driving a full chat/completions turn.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    query = (body or {}).get("query", "")
+    if not isinstance(query, str) or not query.strip():
+        raise HTTPException(status_code=400, detail="Missing or empty 'query'")
+
+    account = request.app.state.account_manager.get_first_account()
+    if not account or not account.auth_manager:
+        raise HTTPException(status_code=503, detail="No initialized accounts available")
+
+    _, results = await call_kiro_mcp_api(query.strip(), account.auth_manager)
+    if results is None:
+        raise HTTPException(status_code=502, detail="MCP web_search call failed")
+
+    return JSONResponse(content={
+        "results": results.get("results", []),
+        "totalResults": results.get("totalResults", len(results.get("results", []))),
+        "query": query.strip(),
+    })
+
+
+@router.get("/v1/usage", dependencies=[Depends(verify_api_key)])
+async def usage(request: Request):
+    """Return monthly credit usage for every configured account and a total."""
+    manager = request.app.state.account_manager
+
+    if not getattr(request.app.state, "account_system", False):
+        try:
+            account = manager.get_first_account()
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="No initialized accounts available",
+            ) from exc
+        if not account or not account.auth_manager:
+            raise HTTPException(status_code=503, detail="No initialized accounts available")
+
+        try:
+            result = await fetch_credit_usage(
+                account.auth_manager,
+                request.app.state.http_client,
+            )
+        except ValueError as exc:
+            logger.error(f"Invalid Kiro usage response: {exc}")
+            raise HTTPException(status_code=502, detail="Invalid Kiro usage response") from exc
+        except Exception as exc:
+            logger.error(f"Kiro usage request failed: {exc}")
+            raise HTTPException(status_code=502, detail="Kiro usage request failed") from exc
+        return JSONResponse(content={
+            **result,
+            "plans": [result["plan"]] if result.get("plan") else [],
+            "accountCount": 1,
+            "successfulAccountCount": 1,
+            "failedAccountCount": 0,
+            "partial": False,
+            "mixedResetDates": False,
+            "accounts": [{
+                "id": "account-1",
+                "available": True,
+                **result,
+            }],
+        })
+
+    accounts = await manager.get_accounts_for_usage()
+    if not accounts:
+        raise HTTPException(status_code=503, detail="No accounts configured")
+
+    async def fetch_usage_or_error(account_number, account):
+        public_id = f"account-{account_number}"
+        if not account.auth_manager:
+            return {"id": public_id, "available": False}
+        try:
+            account_usage = await fetch_credit_usage(
+                account.auth_manager,
+                request.app.state.http_client,
+            )
+            return {"id": public_id, "available": True, **account_usage}
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                f"Kiro usage request failed for {public_id}: {type(exc).__name__}"
+            )
+            return {"id": public_id, "available": False}
+
+    usage_tasks = [
+        asyncio.create_task(fetch_usage_or_error(index, account))
+        for index, account in enumerate(accounts, start=1)
+    ]
+    try:
+        usage_results = await asyncio.gather(*usage_tasks)
+    except asyncio.CancelledError:
+        for task in usage_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*usage_tasks, return_exceptions=True)
+        raise
+
+    valid_usages = [result for result in usage_results if result["available"]]
+    if not valid_usages:
+        raise HTTPException(status_code=502, detail="Kiro usage requests failed")
+
+    try:
+        result = aggregate_credit_usage(valid_usages, total_accounts=len(accounts))
+    except ValueError as exc:
+        logger.error(f"Invalid aggregated Kiro usage response: {exc}")
+        raise HTTPException(status_code=502, detail="Invalid Kiro usage response") from exc
+
+    return JSONResponse(content={**result, "accounts": usage_results})
+
+
+# The model catalog is process-scoped. Reuse one timestamp so repeated
+# /v1/models responses are stable instead of changing whenever the wall clock
+# crosses a second boundary.
+MODEL_CATALOG_CREATED_AT = int(time.time())
+
+
 @router.get("/v1/models", response_model=ModelList, dependencies=[Depends(verify_api_key)])
 async def get_models(request: Request):
     """
@@ -148,6 +280,7 @@ async def get_models(request: Request):
     openai_models = [
         OpenAIModel(
             id=model_id,
+            created=MODEL_CATALOG_CREATED_AT,
             owned_by="anthropic",
             description="Claude model via Kiro API"
         )

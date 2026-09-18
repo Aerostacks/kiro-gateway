@@ -39,8 +39,11 @@ htmlcov
 .env
 .env.local
 .env.*.local
+.env.bak-*
 credentials.json
 state.json
+.native-reasoning-backup-*
+kiro/*.bak-*
 
 # Documentation
 docs/

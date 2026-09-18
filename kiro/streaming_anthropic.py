@@ -262,6 +262,10 @@ async def stream_kiro_to_anthropic(
             elif event.type == "thinking":
                 thinking_content = event.thinking_content or ""
                 full_thinking_content += thinking_content
+                # Native Kiro reasoningContentEvent signatures take precedence;
+                # fake-tag reasoning continues to use the generated placeholder.
+                if event.thinking_signature:
+                    thinking_signature = event.thinking_signature
                 
                 # Handle thinking content based on mode
                 if FAKE_REASONING_HANDLING == "as_reasoning_content":
@@ -770,7 +774,7 @@ async def collect_anthropic_response(
         content_blocks.append({
             "type": "thinking",
             "thinking": result.thinking_content,
-            "signature": generate_thinking_signature()
+            "signature": result.thinking_signature or generate_thinking_signature()
         })
     
     # Add text block if there's content
